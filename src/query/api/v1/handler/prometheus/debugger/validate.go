@@ -24,17 +24,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/m3db/m3/src/query/api/v1/handler"
 	"github.com/m3db/m3/src/query/api/v1/handler/prometheus"
 	"github.com/m3db/m3/src/query/api/v1/handler/prometheus/native"
 	"github.com/m3db/m3/src/query/executor"
 	"github.com/m3db/m3/src/query/models"
-	"github.com/m3db/m3/src/query/storage/debug"
+	"github.com/m3db/m3/src/query/storage/debugger"
 	"github.com/m3db/m3/src/query/ts"
+	qjson "github.com/m3db/m3/src/query/util/json"
 	"github.com/m3db/m3/src/query/util/logging"
 	"github.com/m3db/m3/src/x/net/http"
 
@@ -86,56 +89,144 @@ func (h *PromDebugHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// fmt.Println(promDebug.Input)
-	s := debug.NewStorage(promDebug.Input)
-	engine := executor.NewEngine(s, h.scope.SubScope("debug_engine"))
-	h.engine = engine
-	results, _, err := h.readHandler.ServeHTTPWithEngine(w, r, h.engine)
+	s, err := debug.NewStorage(promDebug.Input)
 	if err != nil {
-		fmt.Println("error: ", err)
+		logger.Error("unable to create storage", zap.Error(err))
+		xhttp.Error(w, err, http.StatusBadRequest)
+		return
 	}
 
-	promResults := debug.DpToTS(promDebug.Results, models.NewTagOptions())
+	h.engine = executor.NewEngine(s, h.scope.SubScope("debug_engine"))
+	results, _, err := h.readHandler.ServeHTTPWithEngine(w, r, h.engine)
+	if err != nil {
+		logger.Error("unable to read data", zap.Error(err))
+		xhttp.Error(w, err, http.StatusBadRequest)
+		return
+	}
+
+	promResults, err := debug.PromResultToSeriesList(promDebug.Results, models.NewTagOptions())
+	if err != nil {
+		logger.Error("unable to convert prom results data", zap.Error(err))
+		xhttp.Error(w, err, http.StatusBadRequest)
+		return
+	}
 
 	for _, res := range results {
 		fmt.Println(res.Values().Datapoints())
 	}
 
-	equal := validate(promResults, results)
+	mismatches := validate(promResults, results)
+	fmt.Println(mismatches)
 
-	fmt.Println("equal: ", equal)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if err := renderDebugMismatchResultsJSON(w, mismatches); err != nil {
+		logger.Error("unable to write back mismatch data", zap.Error(err))
+		xhttp.Error(w, err, http.StatusBadRequest)
+		return
+	}
 }
 
-func validate(prom, m3 []*ts.Series) bool {
+type mismatch struct {
+	seriesName       string
+	promVal, m3Val   float64
+	promTime, m3Time time.Time
+}
+
+func validate(prom, m3 []*ts.Series) [][]mismatch {
 	// check to make sure number of series returned is the same
 	if len(prom) != len(m3) {
-		return false
+		return [][]mismatch{}
 	}
+
+	var mismatches [][]mismatch
 
 	for i, promSeries := range prom {
 		promdps := promSeries.Values().Datapoints()
 		m3dps := m3[i].Values().Datapoints()
 
+		var mismatchList []mismatch
+
 		m3idx := 0
 		for _, promdp := range promdps {
 			if math.IsNaN(promdp.Value) && !math.IsNaN(m3dps[m3idx].Value) {
-				return false
+				mismatchList = append(mismatchList, createMismatch(promSeries.Name(), promdp.Value, m3dps[m3idx].Value, promdp.Timestamp, m3dps[m3idx].Timestamp))
 			}
 
 			for {
 				if !math.IsNaN(m3dps[m3idx].Value) {
 					break
 				}
-
 				m3idx++
 			}
 
-			if promdp.Value != m3dps[m3idx].Value {
-				fmt.Println(promdp.Value, promdp.Timestamp, m3dps[m3idx].Value, m3dps[m3idx].Timestamp)
-				return false
+			if promdp.Value != m3dps[m3idx].Value && !math.IsNaN(promdp.Value) {
+				fmt.Println(promSeries.Name(), promdp.Value, promdp.Timestamp, m3dps[m3idx].Value, m3dps[m3idx].Timestamp)
+				mismatchList = append(mismatchList, createMismatch(promSeries.Name(), promdp.Value, m3dps[m3idx].Value, promdp.Timestamp, m3dps[m3idx].Timestamp))
 			}
+		}
+
+		if len(mismatchList) > 0 {
+			mismatches = append(mismatches, mismatchList)
 		}
 	}
 
-	return true
+	return mismatches
+}
+
+func createMismatch(name string, promVal, m3Val float64, promTime, m3Time time.Time) mismatch {
+	return mismatch{
+		seriesName: name,
+		promVal:    promVal,
+		promTime:   promTime,
+		m3Val:      m3Val,
+		m3Time:     m3Time,
+	}
+}
+
+func renderDebugMismatchResultsJSON(
+	w io.Writer,
+	mismatches [][]mismatch,
+) error {
+	jw := qjson.NewWriter(w)
+	jw.BeginObject()
+
+	jw.BeginObjectField("mismatches_list")
+	jw.BeginArray()
+
+	for _, mismatchList := range mismatches {
+		jw.BeginObject()
+
+		jw.BeginObjectField("mismatches")
+		jw.BeginArray()
+
+		for _, mismatch := range mismatchList {
+			jw.BeginObject()
+
+			jw.BeginObjectField("name")
+			jw.WriteString(mismatch.seriesName)
+
+			jw.BeginObjectField("promVal")
+			jw.WriteFloat64(mismatch.promVal)
+
+			jw.BeginObjectField("promTime")
+			jw.WriteString(mismatch.promTime.String())
+
+			jw.BeginObjectField("m3Val")
+			jw.WriteFloat64(mismatch.m3Val)
+
+			jw.BeginObjectField("m3Time")
+			jw.WriteString(mismatch.m3Time.String())
+
+			jw.EndObject()
+		}
+
+		jw.EndArray()
+		jw.EndObject()
+	}
+
+	jw.EndArray()
+	jw.EndObject()
+	return jw.Close()
 }

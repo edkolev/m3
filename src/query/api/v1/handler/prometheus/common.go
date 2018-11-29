@@ -246,17 +246,12 @@ type Datapoint struct {
 }
 
 // todo(braskin): use `Datapoint` instead of interface{} in values
+// todo(braskin): add tags
 type PromResp struct {
 	Status string `json:"status"`
 	Data   struct {
 		ResultType string `json:"resultType"`
 		Result     []struct {
-			Metric struct {
-				Name     string `json:"__name__"`
-				Instance string `json:"instance"`
-				Job      string `json:"job"`
-				Quantile string `json:"quantile"`
-			} `json:"metric"`
 			Values [][]interface{} `json:"values"`
 		} `json:"result"`
 	} `json:"data"`

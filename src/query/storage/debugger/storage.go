@@ -25,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/m3db/m3/src/query/api/v1/handler/prometheus"
@@ -36,16 +35,18 @@ import (
 )
 
 type debugStorage struct {
-	sync.RWMutex
-
 	seriesList ts.SeriesList
 }
 
-func NewStorage(promReadResp prometheus.PromResp) storage.Storage {
-	seriesList := DpToTS(promReadResp, models.NewTagOptions())
+func NewStorage(promReadResp prometheus.PromResp) (storage.Storage, error) {
+	seriesList, err := PromResultToSeriesList(promReadResp, models.NewTagOptions())
+	if err != nil {
+		return nil, err
+	}
+
 	return &debugStorage{
 		seriesList: seriesList,
-	}
+	}, nil
 }
 
 func (s *debugStorage) Fetch(
@@ -68,23 +69,25 @@ func (s *debugStorage) FetchBlocks(
 		return block.Result{}, err
 	}
 
-	fmt.Println("fetch blocks dps: ", fetchResult.SeriesList[0].Values().Datapoints())
 	return storage.FetchResultToBlockResult(fetchResult, query)
 }
 
-func DpToTS(promReadResp prometheus.PromResp, tagOptions models.TagOptions) ts.SeriesList {
+// PromResultToSeriesList converts a prom response to a series list
+func PromResultToSeriesList(promReadResp prometheus.PromResp, tagOptions models.TagOptions) (ts.SeriesList, error) {
 	results := promReadResp.Data.Result
 	seriesList := make(ts.SeriesList, len(results))
+
 	for i, result := range results {
 		dps := make(ts.Datapoints, len(result.Values))
 		for i, dp := range result.Values {
 			dps[i].Timestamp = time.Unix(0, int64(dp[0].(float64))*int64(time.Second))
 			s, err := strconv.ParseFloat(dp[1].(string), 64)
 			if err != nil {
-				fmt.Println(err)
+				return nil, err
 			}
 			dps[i].Value = s
 		}
+
 		seriesList[i] = ts.NewSeries(
 			fmt.Sprintf("series_%d", i),
 			dps,
@@ -100,12 +103,10 @@ func DpToTS(promReadResp prometheus.PromResp, tagOptions models.TagOptions) ts.S
 		)
 	}
 
-	return seriesList
+	return seriesList, nil
 }
 
 func (s *debugStorage) Type() storage.Type {
-	s.RLock()
-	defer s.RUnlock()
 	return storage.TypeDebug
 }
 
