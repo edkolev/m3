@@ -59,7 +59,7 @@ func TestPromReadHandler_Read(t *testing.T) {
 
 	r, parseErr := parseParams(req)
 	require.Nil(t, parseErr)
-	seriesList, err := promRead.read(context.TODO(), httptest.NewRecorder(), r)
+	seriesList, err := promRead.read(context.TODO(), httptest.NewRecorder(), r, promRead.engine)
 	require.NoError(t, err)
 	require.Len(t, seriesList, 2)
 	s := seriesList[0]

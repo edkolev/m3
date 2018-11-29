@@ -54,6 +54,7 @@ const (
 
 var (
 	emptySeriesList = []*ts.Series{}
+	emptyReqParams  = models.RequestParams{}
 )
 
 // PromReadHandler represents a handler for prometheus read endpoint.
@@ -87,28 +88,8 @@ func NewPromReadHandler(
 }
 
 func (h *PromReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx := context.WithValue(r.Context(), handler.HeaderKey, r.Header)
-	logger := logging.WithContext(ctx)
-
-	params, rErr := parseParams(r)
-	if rErr != nil {
-		xhttp.Error(w, rErr.Inner(), rErr.Code())
-		return
-	}
-
-	if params.Debug {
-		logger.Info("Request params", zap.Any("params", params))
-	}
-
-	if err := h.validateRequest(&params); err != nil {
-		xhttp.Error(w, err, http.StatusBadRequest)
-		return
-	}
-
-	result, err := h.read(ctx, w, params)
+	result, params, err := h.ServeHTTPWithEngine(w, r, h.engine)
 	if err != nil {
-		logger.Error("unable to fetch data", zap.Error(err))
-		xhttp.Error(w, err, http.StatusBadRequest)
 		return
 	}
 
@@ -118,10 +99,40 @@ func (h *PromReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	renderResultsJSON(w, result, params)
 }
 
+func (h *PromReadHandler) ServeHTTPWithEngine(w http.ResponseWriter, r *http.Request, engine *executor.Engine) ([]*ts.Series, models.RequestParams, error) {
+	ctx := context.WithValue(r.Context(), handler.HeaderKey, r.Header)
+	logger := logging.WithContext(ctx)
+
+	params, rErr := parseParams(r)
+	if rErr != nil {
+		xhttp.Error(w, rErr.Inner(), rErr.Code())
+		return nil, emptyReqParams, rErr
+	}
+
+	if params.Debug {
+		logger.Info("Request params", zap.Any("params", params))
+	}
+
+	if err := h.validateRequest(&params); err != nil {
+		xhttp.Error(w, err, http.StatusBadRequest)
+		return nil, emptyReqParams, err
+	}
+
+	result, err := h.read(ctx, w, params, engine)
+	if err != nil {
+		logger.Error("unable to fetch data", zap.Error(err))
+		xhttp.Error(w, err, http.StatusBadRequest)
+		return nil, emptyReqParams, err
+	}
+
+	return result, params, nil
+}
+
 func (h *PromReadHandler) read(
 	reqCtx context.Context,
 	w http.ResponseWriter,
 	params models.RequestParams,
+	engine *executor.Engine,
 ) ([]*ts.Series, error) {
 	ctx, cancel := context.WithTimeout(reqCtx, params.Timeout)
 	defer cancel()
@@ -138,7 +149,7 @@ func (h *PromReadHandler) read(
 
 	// Results is closed by execute
 	results := make(chan executor.Query)
-	go h.engine.ExecuteExpr(ctx, parser, opts, params, results)
+	go engine.ExecuteExpr(ctx, parser, opts, params, results)
 
 	// Block slices are sorted by start time
 	// TODO: Pooling

@@ -239,3 +239,30 @@ func RenderTagCompletionResultsJSON(
 
 	return renderDefaultTagCompletionResultsJSON(w, results)
 }
+
+type Datapoint struct {
+	Timestamp float64
+	Value     string
+}
+
+// todo(braskin): use `Datapoint` instead of interface{} in values
+type PromResp struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string `json:"resultType"`
+		Result     []struct {
+			Metric struct {
+				Name     string `json:"__name__"`
+				Instance string `json:"instance"`
+				Job      string `json:"job"`
+				Quantile string `json:"quantile"`
+			} `json:"metric"`
+			Values [][]interface{} `json:"values"`
+		} `json:"result"`
+	} `json:"data"`
+}
+
+type PromDebug struct {
+	Input   PromResp `json:"input"`
+	Results PromResp `json:"results"`
+}

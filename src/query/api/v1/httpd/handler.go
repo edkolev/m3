@@ -26,6 +26,8 @@ import (
 	_ "net/http/pprof" // needed for pprof handler registration
 	"time"
 
+	"github.com/m3db/m3/src/query/api/v1/handler/prometheus/debug"
+
 	clusterclient "github.com/m3db/m3/src/cluster/client"
 	"github.com/m3db/m3/src/cmd/services/m3coordinator/downsample"
 	dbconfig "github.com/m3db/m3/src/cmd/services/m3dbnode/config"
@@ -124,6 +126,8 @@ func (h *Handler) RegisterRoutes() error {
 		return err
 	}
 
+	nativePromReadHandler := native.NewPromReadHandler(h.engine, h.tagOptions, &h.config.Limits)
+
 	h.Router.HandleFunc(remote.PromReadURL,
 		logged(promRemoteReadHandler).ServeHTTP,
 	).Methods(remote.PromReadHTTPMethod)
@@ -131,7 +135,7 @@ func (h *Handler) RegisterRoutes() error {
 		promRemoteWriteHandler.ServeHTTP,
 	).Methods(remote.PromWriteHTTPMethod)
 	h.Router.HandleFunc(native.PromReadURL,
-		logged(native.NewPromReadHandler(h.engine, h.tagOptions, &h.config.Limits)).ServeHTTP,
+		logged(nativePromReadHandler).ServeHTTP,
 	).Methods(native.PromReadHTTPMethod)
 
 	// Native M3 search and write endpoints
@@ -149,6 +153,11 @@ func (h *Handler) RegisterRoutes() error {
 	h.Router.HandleFunc(remote.TagValuesURL,
 		logged(remote.NewTagValuesHandler(h.storage)).ServeHTTP,
 	).Methods(remote.TagValuesHTTPMethod)
+
+	// Debug endpoints
+	h.Router.HandleFunc(debug.PromDebugURL,
+		logged(debug.NewPromDebugHandler(nativePromReadHandler, h.scope)).ServeHTTP,
+	).Methods(debug.PromDebugHTTPMethod)
 
 	if h.clusterClient != nil {
 		placementOpts := placement.HandlerOptions{
