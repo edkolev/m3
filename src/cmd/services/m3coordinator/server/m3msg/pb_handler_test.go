@@ -21,16 +21,12 @@
 package m3msg
 
 import (
-	"context"
 	"net"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/m3db/m3/src/metrics/encoding/msgpack"
+	"github.com/m3db/m3/src/metrics/encoding/protobuf"
+	"github.com/m3db/m3/src/metrics/metric"
 	"github.com/m3db/m3/src/metrics/metric/aggregated"
-	"github.com/m3db/m3/src/metrics/metric/id"
-	"github.com/m3db/m3/src/metrics/policy"
 	"github.com/m3db/m3/src/msg/consumer"
 	"github.com/m3db/m3/src/msg/generated/proto/msgpb"
 	"github.com/m3db/m3/src/msg/protocol/proto"
@@ -40,20 +36,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	validStoragePolicy = policy.MustParseStoragePolicy("1m:40d")
-)
+var testID = "stats.sjc1.gauges.m3+some-name+dc=sjc1,env=production,service=foo,type=gauge"
 
-func TestM3msgServerHandlerWithMultipleMetricsPerMessage(t *testing.T) {
+func TestM3msgServerWithProtobufHandler(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	m := &mockWriter{m: make(map[string]payload)}
+	w := &mockWriter{m: make(map[string]payload)}
 	hOpts := Options{
-		WriteFn:           m.write,
+		WriteFn:           w.write,
 		InstrumentOptions: instrument.NewOptions(),
 	}
-	handler, err := newHandler(hOpts)
+	handler := newProtobufHandler(hOpts)
 	require.NoError(t, err)
 
 	opts := consumer.NewOptions().
@@ -62,78 +56,41 @@ func TestM3msgServerHandlerWithMultipleMetricsPerMessage(t *testing.T) {
 
 	s := server.NewServer(
 		"a",
-		consumer.NewConsumerHandler(handler.Handle, opts),
+		consumer.NewMessageHandler(handler.message, opts),
 		server.NewOptions(),
 	)
 	s.Serve(l)
 
-	encoder := msgpack.NewAggregatedEncoder(msgpack.NewPooledBufferedEncoder(nil))
-	chunkedMetricWithPolicy := aggregated.ChunkedMetricWithStoragePolicy{
-		ChunkedMetric: aggregated.ChunkedMetric{
-			ChunkedID: id.ChunkedID{
-				Data: []byte("stats.sjc1.gauges.m3+some-name+dc=sjc1,env=production,service=foo,type=gauge"),
-			},
+	conn, err := net.Dial("tcp", l.Addr().String())
+	require.NoError(t, err)
+	m := aggregated.MetricWithStoragePolicy{
+		Metric: aggregated.Metric{
+			ID:        []byte(testID),
 			TimeNanos: 1000,
 			Value:     1,
+			Type:      metric.GaugeType,
 		},
 		StoragePolicy: validStoragePolicy,
 	}
-	require.NoError(t, encoder.EncodeChunkedMetricWithStoragePolicyAndEncodeTime(chunkedMetricWithPolicy, 2000))
-	require.NoError(t, encoder.EncodeChunkedMetricWithStoragePolicyAndEncodeTime(chunkedMetricWithPolicy, 3000))
 
-	conn, err := net.Dial("tcp", l.Addr().String())
-	require.NoError(t, err)
+	encoder := protobuf.NewAggregatedEncoder(nil)
+	require.NoError(t, encoder.Encode(m, 2000))
 	enc := proto.NewEncoder(opts.EncoderOptions())
-	dec := proto.NewDecoder(conn, opts.DecoderOptions())
 	require.NoError(t, enc.Encode(&msgpb.Message{
-		Value: encoder.Encoder().Bytes(),
+		Value: encoder.Buffer().Bytes(),
 	}))
 	_, err = conn.Write(enc.Bytes())
 	require.NoError(t, err)
 
 	var a msgpb.Ack
+	dec := proto.NewDecoder(conn, opts.DecoderOptions())
 	require.NoError(t, dec.Decode(&a))
-	require.Equal(t, 2, m.ingested())
-}
+	require.Equal(t, 1, w.ingested())
 
-type mockWriter struct {
-	sync.Mutex
-
-	m map[string]payload
-	n int
-}
-
-func (m *mockWriter) write(
-	ctx context.Context,
-	name []byte,
-	metricTime time.Time,
-	value float64,
-	sp policy.StoragePolicy,
-	callbackable Callbackable,
-) {
-	m.Lock()
-	m.n++
-	payload := payload{
-		id:         string(name),
-		metricTime: metricTime,
-		value:      value,
-		sp:         sp,
-	}
-	m.m[payload.id] = payload
-	m.Unlock()
-	callbackable.Callback(OnSuccess)
-}
-
-func (m *mockWriter) ingested() int {
-	m.Lock()
-	defer m.Unlock()
-
-	return m.n
-}
-
-type payload struct {
-	id         string
-	metricTime time.Time
-	value      float64
-	sp         policy.StoragePolicy
+	payload, ok := w.m[string(m.ID)]
+	require.True(t, ok)
+	require.Equal(t, string(m.ID), payload.id)
+	require.Equal(t, m.TimeNanos, payload.metricTime.UnixNano())
+	require.Equal(t, m.Value, payload.value)
+	require.Equal(t, m.StoragePolicy, payload.sp)
 }
