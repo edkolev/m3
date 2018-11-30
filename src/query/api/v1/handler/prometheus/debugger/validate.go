@@ -23,7 +23,6 @@ package debug
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"math"
@@ -111,12 +110,11 @@ func (h *PromDebugHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, res := range results {
-		fmt.Println(res.Values().Datapoints())
-	}
+	// for _, res := range results {
+	// 	fmt.Println(res.Values().Datapoints())
+	// }
 
 	mismatches := validate(promResults, results)
-	fmt.Println(mismatches)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -162,7 +160,7 @@ func validate(prom, m3 []*ts.Series) [][]mismatch {
 			}
 
 			if promdp.Value != m3dps[m3idx].Value && !math.IsNaN(promdp.Value) {
-				fmt.Println(promSeries.Name(), promdp.Value, promdp.Timestamp, m3dps[m3idx].Value, m3dps[m3idx].Timestamp)
+				// fmt.Println(promSeries.Name(), promdp.Value, promdp.Timestamp, m3dps[m3idx].Value, m3dps[m3idx].Timestamp)
 				mismatchList = append(mismatchList, createMismatch(promSeries.Name(), promdp.Value, m3dps[m3idx].Value, promdp.Timestamp, m3dps[m3idx].Timestamp))
 			}
 		}

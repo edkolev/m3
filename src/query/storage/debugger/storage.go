@@ -72,7 +72,7 @@ func (s *debugStorage) FetchBlocks(
 	return storage.FetchResultToBlockResult(fetchResult, query)
 }
 
-// PromResultToSeriesList converts a prom response to a series list
+// PromResultToSeriesList converts a prom result to a series list
 func PromResultToSeriesList(promReadResp prometheus.PromResp, tagOptions models.TagOptions) (ts.SeriesList, error) {
 	results := promReadResp.Data.Result
 	seriesList := make(ts.SeriesList, len(results))
